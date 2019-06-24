@@ -211,7 +211,7 @@ func (sc *serviceSource) Endpoints() ([]*endpoint.Endpoint, error) {
 	return endpoints, nil
 }
 
-func (sc *serviceSource) extractHeadlessEndpoints(svc *v1.Service, hostname string, ttl endpoint.TTL) []*endpoint.Endpoint {
+func (sc *serviceSource) extractHeadlessEndpoints(svc *v1.Service, hostname string, ttl endpoint.TTL, externalIp bool) []*endpoint.Endpoint {
 	var endpoints []*endpoint.Endpoint
 
 	labelSelector, err := metav1.ParseToLabelSelector(labels.Set(svc.Spec.Selector).AsSelectorPreValidated().String())
@@ -237,7 +237,22 @@ func (sc *serviceSource) extractHeadlessEndpoints(svc *v1.Service, hostname stri
 			headlessDomains = append(headlessDomains, fmt.Sprintf("%s.%s", v.Spec.Hostname, hostname))
 		}
 		for _, headlessDomain := range headlessDomains {
-			if sc.publishHostIP == true {
+			if sc.publishHostIP && externalIp {
+				node, err := sc.nodeInformer.Lister().Get(v.Spec.NodeName)
+				if err != nil {
+					return nil
+				}
+				if v.Status.Phase == v1.PodRunning {
+					for _, x := range node.Status.Addresses {
+						if x.Type == v1.NodeExternalIP {
+							log.Debugf("Generating matching endpoint %s with External %s", headlessDomain, x.Address)
+							targetsByHeadlessDomain[headlessDomain] = append(targetsByHeadlessDomain[headlessDomain], x.Address)
+						}
+					}
+				} else {
+					log.Debugf("Pod %s is not in running phase", v.Spec.Hostname)
+				}
+			} else if sc.publishHostIP == true {
 				log.Debugf("Generating matching endpoint %s with HostIP %s", headlessDomain, v.Status.HostIP)
 				// To reduce traffice on the DNS API only add record for running Pods. Good Idea?
 				if v.Status.Phase == v1.PodRunning {
@@ -365,6 +380,8 @@ func (sc *serviceSource) generateEndpoints(svc *v1.Service, hostname string, pro
 		log.Warn(err)
 	}
 
+	externalIp := getExternalIpFromAnnotations(svc.Annotations)
+
 	epA := &endpoint.Endpoint{
 		RecordTTL:        ttl,
 		RecordType:       endpoint.RecordTypeA,
@@ -394,7 +411,7 @@ func (sc *serviceSource) generateEndpoints(svc *v1.Service, hostname string, pro
 			targets = append(targets, extractServiceIps(svc)...)
 		}
 		if svc.Spec.ClusterIP == v1.ClusterIPNone {
-			endpoints = append(endpoints, sc.extractHeadlessEndpoints(svc, hostname, ttl)...)
+			endpoints = append(endpoints, sc.extractHeadlessEndpoints(svc, hostname, ttl, externalIp)...)
 		}
 	case v1.ServiceTypeNodePort:
 		// add the nodeTargets and extract an SRV endpoint
